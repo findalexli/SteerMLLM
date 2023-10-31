@@ -423,7 +423,7 @@ class GetAttributeModel:
                 self.tokenizer.eos_token_id in response
                 for response in responses.tolist()
             ]
-
+            # We comment this out 10/30 to see if you can just use the query as the prompt
             # sequences = [
             #     torch.concat((query, response), dim=0)
             #     for query, response in zip(queries, responses)
@@ -639,7 +639,7 @@ if __name__ == "__main__":
     attribute_model.training_args.rollout_per_device_batch_size = 8
     train_dataloader = attribute_model.get_train_dataloader()
     total_rewards_dict = {}
-    for i in tqdm_function(range(2000)):
+    for j in tqdm_function(range(2000)):
         queries_batches = [
             next(train_dataloader)
         ]
@@ -647,8 +647,8 @@ if __name__ == "__main__":
         image_file_ids = rollout['image_file_ids'].tolist()
         indexes = rollout['indexes'].tolist()
         rewards = rollout['rewards'].tolist()
-        reward_dict = {i: (image_file_ids[i], rewards[i]) for i in range(len(indexes))}
-        print(f'At {i} iteration, reward_dict: {reward_dict}')
+        reward_dict = {indexes[i]: (image_file_ids[i], rewards[i]) for i in range(len(indexes))}
+        print(f'At {j} iteration, reward_dict: {reward_dict}')
         total_rewards_dict.update(reward_dict)
         with open(f'total_rewards_dict_1030.json', 'w') as f:
             json.dump(total_rewards_dict, f)
