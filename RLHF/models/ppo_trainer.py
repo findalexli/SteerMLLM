@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import pdb
 import json
 import gc
 import glob
@@ -563,6 +563,7 @@ class PPOTrainer(RLTrainer):
             values=rollouts["values"].to(self.accelerator.device),
         )
         advantages = {key: value.cpu() for key, value in advantages.items()}
+        pdb.set_trace()
         return {**rollouts, **advantages}
 
     def post_reward(

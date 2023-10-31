@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import pdb
 import dataclasses
 from typing import Callable, Dict, Optional, List, Sequence
 
@@ -222,3 +222,209 @@ def make_rl_data_module(
         eval_dataset=None,
         data_collator=DataCollatorForQueryResponseDataset(),
     )
+
+# A new class containing also the response
+class QueryCoupledResponseDataset(Dataset):
+    """Dataset that emits tokenized left-padded queries."""
+
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        tokenizer: transformers.PreTrainedTokenizer,
+        query_len: int,
+        response_len: int,
+        df_postprocessor: Optional[Callable] = None,
+        data_args: Optional[Dict] = None,
+    ):
+        self.data_args = data_args
+        super(QueryCoupledResponseDataset, self).__init__()
+
+        if df_postprocessor is not None:
+            df = df_postprocessor(df)
+        list_dict_data = df.to_dict(orient="records")
+        ########## Start of query processing
+        _s = copy.deepcopy([ex["conversations"] for ex in list_dict_data])
+        _s = preprocess_multimodal(_s, data_args)
+
+        _s = [__s[:2] for __s in _s]
+
+        for __s in _s:
+            assert __s[-1]["from"] == "gpt", f"{__s}"
+            # __s[-1]["value"] = "\n"
+        queries = [
+            preprocess(
+                [__s],
+                tokenizer,
+                has_image=True,
+                mask_target=False,
+                query_len=query_len,
+            )["input_ids"]
+            for __s in tqdm.tqdm(_s)
+        ]
+
+        queries = [
+            torch.tensor(query, dtype=torch.long).view(-1)[:-3] for query in queries
+        ]
+
+        filtered_queries = []
+
+        for query in queries:
+            if len(query) <= query_len:
+                filtered_queries.append(query)
+
+        max_query_len = max(len(query) for query in filtered_queries)
+        logger.warning(f"Max query length: {max_query_len}")
+
+        logger.warning(
+            f"Filtered out {len(queries) - len(filtered_queries)} instances out of {len(queries)} that "
+            f"exceed length limit. These examples are not used for training, but will still be used in evaluation. "
+        )
+
+        queries = torch.stack(
+            [
+                utils.left_pad(
+                    query, target_size=(query_len,), value=tokenizer.pad_token_id
+                )
+                for query in filtered_queries
+            ]
+        )
+
+        self.queries = queries
+        self.query_attn_masks = queries.ne(tokenizer.pad_token_id).long()
+        ########## End of query processing
+
+        ########## Start of response processing
+        """
+        Set the prompt to be 'n and also preprocess the response without the image token
+        """
+        del _s
+        _s = copy.deepcopy([ex["conversations"] for ex in list_dict_data])
+        _s = preprocess_multimodal(_s, data_args)
+
+        _s = [__s[:2] for __s in _s]
+        # Set the prompt to be zero
+        for __s in _s:
+            assert __s[-1]["from"] == "gpt", f"{__s}"
+            __s[-2]["value"] = "\n"
+
+        responses = [
+            preprocess(
+                [__s],
+                tokenizer,
+                has_image=False,
+                mask_target=False,
+                response_len=response_len,
+            )["input_ids"]
+            for __s in tqdm.tqdm(_s)
+        ]
+
+        responses = [
+            torch.tensor(response, dtype=torch.long).view(-1)[:-3] for response in responses
+        ]
+
+        filtered_responses = []
+
+        for response in responses:
+            if len(response) <= response_len:
+                filtered_responses.append(response)
+
+        max_response_len = max(len(response) for response in filtered_responses)
+        logger.warning(f"Max query length: {max_response_len}")
+
+        logger.warning(
+            f"Filtered out {len(responses) - len(filtered_responses)} instances out of {len(responses)} that "
+            f"exceed length limit. These examples are not used for training, but will still be used in evaluation. "
+        )
+
+        responses = torch.stack(
+            [
+                utils.left_pad(
+                    query, target_size=(response_len,), value=tokenizer.pad_token_id
+                )
+                for query in filtered_responses
+            ]
+        )
+
+        self.responses = responses
+        self.response_attn_masks = responses.ne(tokenizer.pad_token_id).long()
+        ########## End of response processing
+        # Auxiliary data.
+        self.list_dict_data = list_dict_data
+
+    def __getitem__(self, idx):
+        return_dict = dict(
+            indexes = torch.tensor(idx, dtype=torch.long),
+            queries=self.queries[idx],
+            query_attn_masks=self.query_attn_masks[idx],
+            responses=self.responses[idx],
+            response_attn_masks=self.response_attn_masks[idx],
+        )
+
+        image_file = self.list_dict_data[idx]["image"]
+        image_folder = self.data_args.image_folder
+        processor = self.data_args.image_processor
+        reward_processor = self.data_args.reward_image_processor
+
+        if "caption_type" in self.list_dict_data[idx]:
+            caption_type = self.list_dict_data[idx]["caption_type"]
+        else:
+            caption_type = 1
+
+        if "length_bonus" in self.list_dict_data[idx]:
+            length_bonus = self.list_dict_data[idx]["length_bonus"]
+        else:
+            length_bonus = 1.0
+
+        try:
+            image = Image.open(os.path.join(image_folder, image_file)).convert("RGB")
+        except:
+            raise ValueError(f"Error loading image {image_file} for index {idx}")
+
+        original_image = image
+
+        if self.data_args.image_aspect_ratio == "pad":
+
+            def expand2square(pil_img, background_color):
+                width, height = pil_img.size
+                if width == height:
+                    return pil_img
+                elif width > height:
+                    result = Image.new(pil_img.mode, (width, width), background_color)
+                    result.paste(pil_img, (0, (width - height) // 2))
+                    return result
+                else:
+                    result = Image.new(pil_img.mode, (height, height), background_color)
+                    result.paste(pil_img, ((height - width) // 2, 0))
+                    return result
+
+            image = expand2square(
+                image, tuple(int(x * 255) for x in processor.image_mean)
+            )
+            image = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
+
+            reward_image = expand2square(
+                original_image, tuple(int(x * 255) for x in reward_processor.image_mean)
+            )
+            reward_image = reward_processor.preprocess(
+                reward_image, return_tensors="pt"
+            )["pixel_values"][0]
+        else:
+            image = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
+            reward_image = reward_processor.preprocess(
+                original_image, return_tensors="pt"
+            )["pixel_values"][0]
+
+        return_dict["images"] = image
+        return_dict["reward_images"] = reward_image
+        return_dict["image_file_ids"] = torch.tensor(
+            int(image_file.split(".")[0]), dtype=torch.long
+        )
+        return_dict["caption_types"] = torch.tensor(caption_type, dtype=torch.long)
+        return_dict["length_bonus_multiplier"] = torch.tensor(
+            length_bonus, dtype=torch.float
+        )
+
+        return return_dict
+
+    def __len__(self):
+        return len(self.queries)
