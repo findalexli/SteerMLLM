@@ -29,7 +29,7 @@ from transformers.utils.generic import ModelOutput
 from peft import PeftModel, LoraModel, LoraConfig
 
 from models.qlora_model import get_accelerate_model
-
+import pdb
 from llava.model import *
 
 
@@ -302,7 +302,6 @@ class RewardModelTrainer(transformers.Trainer):
         rewards = einops.rearrange(
             rewards_flat, "(b c) -> b c", c=num_candidates
         )  # Size: (bsz, num_candidates).
-
         rewards_0, rewards_1 = tuple(
             batch_select(rewards, index) for index in (index_0, index_1)
         )  # Size: (bsz, num_pairs).
@@ -311,7 +310,8 @@ class RewardModelTrainer(transformers.Trainer):
         loss = F.binary_cross_entropy_with_logits(
             logits, choice.to(logits.dtype), reduction="mean"
         )
-
+        print('reward 1 mean ', rewards_1.mean())
+        print('reward 2 mean ', rewards_0.mean())
         loss = loss + (rewards_1 + rewards_0).mean().abs() * 1e-3
 
         logged_rewards = torch.stack((rewards_1, rewards_0), dim=-1)

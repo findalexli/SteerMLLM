@@ -15,12 +15,13 @@ MODEL_VERSION=vicuna-13b-v1.5-336
 
 LM_MODEL_CKPT=lmsys/vicuna-13b-v1.5
 # MM_CKPT=/shared/llava-$MODEL_VERSION-pretrain/mm_projector.bin
-DATA_PATH=/home/ubuntu/RLHF/LLaVA-RLHF-Data/llava_ppo50k-aokvqa12k-vqa10k-subset-with-reward-hacked.json
+DATA_PATH=/home/ubuntu/RLHF/LLaVA-RLHF/SFT/playground/steer_llava_attribute_in_userpromtp_0_1224.json
 IMAGE_FOLDER=/home/ubuntu/latest_llava/llava_1dot5data/coco/train2017
+model_name=liuhaotian/llava-v1.5-13b
 
 deepspeed train/train.py \
     --deepspeed ./scripts/zero3.json \
-    --model_name_or_path /home/ubuntu/RLHF/LLaVA-RLHF-13b-v1.5-336/sft_model \
+    --model_name_or_path ${model_name} \
     --version $PROMPT_VERSION \
     --data_path ${DATA_PATH} \
     --image_folder ${IMAGE_FOLDER} \

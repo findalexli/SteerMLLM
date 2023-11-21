@@ -3,23 +3,23 @@
 set -e
 set -x
 
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export DATA_DIR="/path/to/your/data/directory"
-export MODEL_DIR="/path/to/your/model/directory"
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export DATA_DIR=/home/ubuntu/RLHF/LLaVA-RLHF-Data
+export MODEL_DIR=/home/ubuntu/RLHF/LLaVA-RLHF-13b-v1.5-336
 export PYTHONPATH="$PWD:$PYTHONPATH"
-export GPUS_PER_NODE=8
-export OMP_NUM_THREADS=8
+export GPUS_PER_NODE=4
+export OMP_NUM_THREADS=4
 export TRANSFORMERS_OFFLINE=1
 
 # MODEL CONFIG
 VISION_TOWER=openai/clip-vit-large-patch14-336
-BASE_MODEL_NAME=LLaVA-RLHF-13b-v1.5-336/sft_model
+LM_MODEL_CKPT=sft_model
 
-POLICY_LORA=LLaVA-RL-INIT-13b-v1.5-336-lora-padding/lora_default
-RM_LORA=LLaVA-Fact-RM-13b-v1.5-336-lora-padding/checkpoint-200  # we use early stopping
+POLICY_LORA=rlhf_lora_adapter_model
+RM_LORA=rm_lora_adapter_model  # we use early stopping
 
 # SAVE CONFIG
-MODEL_NAME=LLaVA-RL-Fact-RLHF-13b-v1.5-336-lora-padding
+MODEL_NAME=LLaVA-RL-Fact-RLHF-13b-v1.5-336-lora-padding-1107
 
 # TRAINING CONFIG
 LEARNING_RATE=3e-5
@@ -49,7 +49,7 @@ torchrun \
     --rollout_batch_size $ROLLOUT_BATCH_SIZE \
     --rollout_per_device_batch_size $ROLLOUT_PER_DEVICE_BATCH_SIZE \
     --reward_model_per_device_batch_size $REWARD_MODEL_PER_DEVICE_BATCH_SIZE \
-    --base_model_name "$LM_MODEL_CKPT" \
+    --base_model_name $MODEL_DIR/$LM_MODEL_CKPT \
     --policy_model_name_or_path "$MODEL_DIR/$POLICY_LORA" \
     --reward_model_name_or_path "$MODEL_DIR/$RM_LORA" \
     --learning_rate $LEARNING_RATE \
@@ -87,7 +87,7 @@ torchrun \
     --query_len 128 \
     --response_len 896 \
     --noptepochs $NOPTEPOCHS \
-    --image_folder $DATA_DIR/coco/train2017 \
+    --image_folder /home/ubuntu/latest_llava/llava_1dot5data/coco/train2017 \
     --vision_tower $VISION_TOWER \
     --mm_vision_select_layer -2 \
     --mm_use_im_start_end False \

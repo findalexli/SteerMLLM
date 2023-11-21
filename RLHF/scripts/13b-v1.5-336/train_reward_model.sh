@@ -7,8 +7,8 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export DATA_DIR="/path/to/your/data/directory"
 export MODEL_DIR="/path/to/your/model/directory"
 export PYTHONPATH="$PWD:$PYTHONPATH"
-export GPUS_PER_NODE=8
-export OMP_NUM_THREADS=8
+export GPUS_PER_NODE=4
+export OMP_NUM_THREADS=4
 
 
 # MODEL CONFIG

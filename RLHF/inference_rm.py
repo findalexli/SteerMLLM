@@ -120,24 +120,53 @@ from models.rl_trainer import (
 from finetune_lora_ppo import ModelArguments, TrainingArguments, DataArguments
 from data_utils.data_utils_ppo import QueryResponseDataset, QueryCoupledResponseDataset
 from data_utils.data_utils_ppo import DataCollatorForQueryResponseDataset
+from models.ppo_trainer import smart_tokenizer_and_embedding_resize
 class DisableLogger:
     def __enter__(self):
         logging.disable(logging.CRITICAL)
 
     def __exit__(self, exit_type, exit_value, exit_traceback):
         logging.disable(logging.NOTSET)
+model_args = ModelArguments()
+training_args = TrainingArguments()
+data_args = DataArguments()
+model_args.mm_vision_select_layer = -2
+model_args.mm_use_im_patch_token = False 
+data_args.image_aspect_ratio = 'pad'
+data_args.is_multimodal = True
+model_args.vision_tower = "openai/clip-vit-large-patch14-336"
+data_args.image_folder = '/home/ubuntu/latest_llava/llava_1dot5data/coco/train2017'
+training_args.query_len = 1280 # Deault is 128
+training_args.model_max_length = 2048
+training_args.group_by_length = False
+training_args.response_len = 768 # Default is 896
+training_args.penalty_reward_value = -8.0
+training_args.length_bonus_score = -10.0
+training_args.correct_bonus_score = 2.0
+training_args.relative_stop_token_penalty = True
+training_args.penalize_no_stop_token = True
+training_args.ddp_find_unused_parameters = False
+training_args.resume_from_training = True
+training_args.kl_coef = 0.1
+training_args.max_grad_norm = 1.0
+training_args.whitening_async_stats = "full_batch"
+training_args.clean_tokens_after_eos = True
+training_args.temperature = 1.0
+training_args.whiten_rewards = False
+data_args.mm_use_im_start_end = False
+training_args.bf16 = True
+training_args.fp16 = False
+data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
+training_args.use_im_start_end = model_args.mm_use_im_start_end
+training_args.reward_model_name_or_path = '/home/ubuntu/RLHF/LLaVA-RLHF-13b-v1.5-336/rm_lora_adapter_model'
+rm_path = '/home/ubuntu/RLHF/LLaVA-Fact-RM-13b-v1.5-336-lora-padding/checkpoint-250'
+resume_path = None
 
-rm_path = '/home/ubuntu/RLHF/LLaVA-RLHF-13b-v1.5-336/rm_lora_adapter_model'
-rm_model = load_4bit_reward_model_for_inference(rm_path)
 
-vision_tower = rm_model.backbone_model.get_vision_tower()
-if not vision_tower.is_loaded:
-    vision_tower.load_model()
-vision_tower.to(device="cuda", dtype=torch.bfloat16)
-vision_tower.requires_grad_(False)
-# Tokenizer
+# Tokenizer loading
 tokenizer_model_name = "/home/ubuntu/RLHF/LLaVA-RLHF-13b-v1.5-336/sft_model"
 TokenizerClass = AutoTokenizer
+model_args.base_model_name = tokenizer_model_name
 
 tokenizer = TokenizerClass.from_pretrained(
     tokenizer_model_name,
@@ -149,68 +178,93 @@ tokenizer = TokenizerClass.from_pretrained(
 )
 
 tokenizer.pad_token = tokenizer.unk_token
-# Dataset loading
+### Section: Reward model loading
+# Following the make_models function
+reward_model = load_4bit_reward_model_for_inference(rm_path, 
+            vision_tower="openai/clip-vit-large-patch14-336",
+            image_aspect_ratio=data_args.image_aspect_ratio,
+            image_grid_pinpoints=data_args.image_grid_pinpoints,
+            bits=4,
+            fp16=training_args.fp16,
+            bf16=training_args.bf16,
+            gradient_checkpointing=training_args.gradient_checkpointing,
+            adapter_name="lora_reward",
+            is_trainable=False,
+            reuse_base_model=True,
+            trust_remote_code=model_args.trust_remote_code,
+        )
+
+num_new_tokens = 0
+
+smart_tokenizer_and_embedding_resize(num_new_tokens, tokenizer, reward_model.backbone_model) 
+
+if model_args.vision_tower is not None:
+    reward_model.backbone_model.config.image_aspect_ratio = data_args.image_aspect_ratio
+    reward_model.backbone_model.config.image_grid_pinpoints = (
+        data_args.image_grid_pinpoints
+    )
+
+    vision_tower = reward_model.backbone_model.get_vision_tower()
+    if not vision_tower.is_loaded:
+        vision_tower.load_model()
+    vision_tower.to(device="cuda", dtype=torch.bfloat16)
+    vision_tower.requires_grad_(False)
+
+    mm_projector = reward_model.backbone_model.get_model().mm_projector
+    mm_projector.to(device="cuda", dtype=torch.bfloat16)
+    mm_projector.requires_grad_(False)
+
+data_args.image_processor = vision_tower.image_processor
+data_args.reward_image_processor = vision_tower.image_processor
+# Data frame loading
 
 
 
-model_args = ModelArguments()
-training_args = TrainingArguments()
-data_args = DataArguments()
 data_args.dataset_path = '/home/ubuntu/RLHF/LLaVA-RLHF-Data/llava_ppo50k-aokvqa12k-vqa10k.json'
 train_instructions = datasets.load_dataset(
             "json", data_files=data_args.dataset_path
         )
 train_df = pd.DataFrame(train_instructions['train'])
+train_df = train_df.iloc[:50]
 # Override the base model name model_args.base_model_name
 
-model_args.base_model_name = tokenizer_model_name
+# model_args.base_model_name = tokenizer_model_name
 
-model_args.vision_tower = "openai/clip-vit-large-patch14-336"
+# model_args.vision_tower = "openai/clip-vit-large-patch14-336"
 
-if model_args.vision_tower is not None:
-    from llava.model import LlavaLlamaForCausalLM
+# if model_args.vision_tower is not None:
+#     from llava.model import LlavaLlamaForCausalLM
 
-    with DisableLogger():
-        base_model = LlavaLlamaForCausalLM.from_pretrained(
-            model_args.base_model_name,
-            cache_dir=training_args.cache_dir,
-        )
+#     with DisableLogger():
+#         base_model = LlavaLlamaForCausalLM.from_pretrained(
+#             model_args.base_model_name,
+#             cache_dir=training_args.cache_dir,
+#         )
 
-    vision_tower = base_model.get_vision_tower()
-    if not vision_tower.is_loaded:
-        vision_tower.load_model()
+#     vision_tower = base_model.get_vision_tower()
+#     if not vision_tower.is_loaded:
+#         vision_tower.load_model()
 
-    data_args.image_processor = vision_tower.image_processor
-    del base_model
+#     data_args.image_processor = vision_tower.image_processor
+#     del base_model
 
-if model_args.reward_base_model_name is None:
-    model_args.reward_base_model_name = model_args.base_model_name
-    data_args.reward_image_processor = vision_tower.image_processor
-else:
-    with DisableLogger():
-        reward_base_model = LlavaLlamaForCausalLM.from_pretrained(
-            model_args.reward_base_model_name,
-            cache_dir=training_args.cache_dir,
-        )
-    reward_vision_tower = reward_base_model.get_vision_tower()
-    if not reward_vision_tower.is_loaded:
-        reward_vision_tower.load_model()
-    data_args.reward_image_processor = reward_vision_tower.image_processor
-    del reward_base_model
+# if model_args.reward_base_model_name is None:
+#     model_args.reward_base_model_name = model_args.base_model_name
+#     data_args.reward_image_processor = vision_tower.image_processor
+# else:
+#     with DisableLogger():
+#         reward_base_model = LlavaLlamaForCausalLM.from_pretrained(
+#             model_args.reward_base_model_name,
+#             cache_dir=training_args.cache_dir,
+#         )
+#     reward_vision_tower = reward_base_model.get_vision_tower()
+#     if not reward_vision_tower.is_loaded:
+#         reward_vision_tower.load_model()
+#     data_args.reward_image_processor = reward_vision_tower.image_processor
+#     del reward_base_model
 
-data_args.is_multimodal = True
-data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-training_args.use_im_start_end = model_args.mm_use_im_start_end
-model_args.mm_vision_select_layer = -2
 
-### A couple critical parameter set borrowed fromt the launch script
-data_args.image_aspect_ratio = 'pad'
-data_args.image_folder = '/home/ubuntu/latest_llava/llava_1dot5data/coco/train2017'
-training_args.query_len = 1280
-training_args.response_len = 768
-data_args.mm_use_im_start_end = False
 
-############## end of arguments loading
 
 if model_args.version in conversation_lib.conv_templates:
     conversation_lib.default_conversation = conversation_lib.conv_templates[
@@ -238,17 +292,21 @@ make_rl_data_module_output_dict = dict(
 ### Definition the inference class
 
 class GetAttributeModel:
-    def __init__(self, rm_model, tokenizer, accelerator: AlpacaAccelerator, training_args) -> None:
-        self.reward_model = rm_model
+    def __init__(self, reward_model, tokenizer, accelerator: AlpacaAccelerator, training_args) -> None:
+        self.reward_model = reward_model
         self.tokenizer = tokenizer
         self.accelerator = accelerator
+        self.reward_model = accelerator.prepare(self.reward_model)
         self.training_args = training_args
         self.args = training_args # TODO add other args
-        self.args.reward_prompt_file = "/home/ubuntu/RLHF/LLaVA-RLHF/RLHF/scripts/13b-v1.5-336/train_reward_model.sh"
+        self.args.reward_prompt_file = "/home/ubuntu/RLHF/LLaVA-RLHF/RLHF/prompts/fact_rlhf_reward_prompt.txt"
         self.train_dataset = make_rl_data_module_output_dict['train_dataset']
         self.data_collator = make_rl_data_module_output_dict['data_collator']
+        self.image_to_caption_file = '/home/ubuntu/RLHF/LLaVA-RLHF-Data/image_to_caption.json'
 
-
+        if self.image_to_caption_file is not None:
+            with open(self.image_to_caption_file, "r") as f:
+                self.image_to_caption_mapping = json.load(f)
         self.reward_model_prompt = None
         self.reward_model_prompt_untokenized = None
 
@@ -260,7 +318,6 @@ class GetAttributeModel:
                 return_tensors="pt",
                 add_special_tokens=False,
             )
-        self.image_to_caption_mapping = None
 
     def get_train_dataloader(self):
         logger.warning(
@@ -491,6 +548,8 @@ class GetAttributeModel:
                             )
                         )
                         reward_model_prompts.append(reward_model_prompt_per_example)
+                    # pdb.set_trace()
+                    print('reward_model_prompts', reward_model_prompts)
                     reward_model_prompts = self.tokenizer(
                         reward_model_prompts,
                         return_tensors="pt",
@@ -517,6 +576,7 @@ class GetAttributeModel:
                 skip_special_tokens=False,
                 clean_up_tokenization_spaces=False,
             )
+            rollouts_batch["text_sequences"] = text_sequences
 
             if self.accelerator.is_main_process:
                 print("=" * 20)
@@ -546,8 +606,6 @@ class GetAttributeModel:
             sequences_attention_mask = sequences.ne(self.tokenizer.pad_token_id)
 
             # Evaluate logprobs of the samples.
-
-
 
             rollouts_batch["length_bonus"] = length_bonus
             rollouts_batch["correct_bonus"] = correct_bonus
@@ -635,7 +693,7 @@ if __name__ == "__main__":
     ],
 )
 
-    attribute_model = GetAttributeModel(rm_model, tokenizer, accelerator, training_args)
+    attribute_model = GetAttributeModel(reward_model, tokenizer, accelerator, training_args)
     attribute_model.training_args.rollout_per_device_batch_size = 8
     train_dataloader = attribute_model.get_train_dataloader()
     total_rewards_dict = {}
@@ -647,8 +705,9 @@ if __name__ == "__main__":
         image_file_ids = rollout['image_file_ids'].tolist()
         indexes = rollout['indexes'].tolist()
         rewards = rollout['rewards'].tolist()
-        reward_dict = {indexes[i]: (image_file_ids[i], rewards[i]) for i in range(len(indexes))}
-        print(f'At {j} iteration, reward_dict: {reward_dict}')
+        text_sequences = [sequence.split("<unk><s> ")[-1] for sequence in rollout['text_sequences']]
+        reward_dict = {indexes[i]: (image_file_ids[i], rewards[i], text_sequences[i]) for i in range(len(indexes))}
+        # print(f'At {j} iteration, reward_dict: {reward_dict}')
         total_rewards_dict.update(reward_dict)
-        with open(f'total_rewards_dict_1030.json', 'w') as f:
+        with open(f'total_rewards_dict_1108_with_prompt_string_factual_correct_dataargs.json', 'w') as f:
             json.dump(total_rewards_dict, f)
