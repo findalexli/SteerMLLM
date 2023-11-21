@@ -182,11 +182,12 @@ def get_gpt4_comment(output_path, start_index, end_index):
 
 if __name__ == "__main__":
     load_dotenv()
-    sage_api = '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'
-    shicheng_api = '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'
+    my_other_api = os.environ.get('myother_openai_api')
+    shicheng_api = os.environ.get('shicheng_openai_api')
+    
     environment_key = os.environ.get('OPENAI_KEY')
     
-    api_lists = [sage_api, shicheng_api, environment_key]
+    api_lists = [my_other_api, shicheng_api, environment_key]
     start_index = 1825
     combined_output_path = f'/home/ubuntu/RLHF/LLaVA-RLHF-Data/llava_7b_v1_preference_subsample_gpt4v_response_{start_index}_{start_index + 300}_300_combined.json'
     combined_output = {}
